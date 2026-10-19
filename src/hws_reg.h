@@ -172,4 +172,7 @@ typedef enum {
 } COLOR;
 
 //----------------------------
+/* Register 110 + ch: input frame rate in whole fps, FPGA versions above 121 */
+#define HWS_REG_IN_FPS(ch)	(CVBS_IN_BASE + (110 + (ch)) * PCIE_BARADDROFSIZE)
+
 #endif
