@@ -697,7 +697,7 @@ static int hws_open(struct file *file)
     q->buf_struct_size = sizeof(struct hwsvideo_buffer);
     q->ops = &hwspcie_video_multi_qops;
     q->mem_ops = &vb2_vmalloc_memops;
-    q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+    q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
     /*
      * Per-open lock for this queue only. vb2 releases it while a blocking
      * DQBUF waits (via wait_prepare/wait_finish before 7.0, by itself since),
@@ -1614,7 +1614,10 @@ static int hws_start_streaming_multi(struct vb2_queue *q, unsigned int count)
      * start from one consumer from interleaving with a stop from another. */
     mutex_lock(&videodev->engine_lock);
     if (atomic_inc_return(&videodev->engine_users) == 1) {
-        videodev->seqnr = 0;
+        unsigned long flags;
+        spin_lock_irqsave(&videodev->dev->videoslock[videodev->index], flags);
+        videodev->dev->m_FrameSeq[videodev->index] = 0;
+        spin_unlock_irqrestore(&videodev->dev->videoslock[videodev->index], flags);
         StartVideoCapture(videodev->dev, videodev->index);
     }
     mutex_unlock(&videodev->engine_lock);
@@ -3312,6 +3315,8 @@ void video_data_process(struct work_struct *p_work)
     int interlace = 0;
     int needRotateVideo = 0;
     int nWidth, nHeight;
+    u64 frame_ts;
+    u32 frame_seq;
 
     /* Hold per-channel lock while we pick a locked source buffer and while we keep it locked. */
     spin_lock_irqsave(&pdx->videoslock[nDecoder], devflags);
@@ -3360,6 +3365,14 @@ void video_data_process(struct work_struct *p_work)
         }
     }
 
+    if (pdx->m_curr_No_Video[nDecoder] == 0) {
+        frame_ts = pdx->m_VideoInfo[nDecoder].pStatusInfo[nVindex].tsNs;
+        frame_seq = pdx->m_VideoInfo[nDecoder].pStatusInfo[nVindex].seq;
+    } else {
+        frame_ts = ktime_get_ns();
+        frame_seq = pdx->m_FrameSeq[nDecoder]++;
+    }
+
     /* Fan-out: deliver one frame to as many queued consumer buffers as we have. */
     for (;;) {
         struct hws_vfh_ctx *ctx;
@@ -3371,7 +3384,8 @@ void video_data_process(struct work_struct *p_work)
         if (!buf)
             break;
 
-        buf->vb.vb2_buf.timestamp = ktime_get_ns();
+        /* every consumer's copy of this frame carries the frame's own time and number */
+        buf->vb.vb2_buf.timestamp = frame_ts;
         buf->vb.field = V4L2_FIELD_NONE;
 
         if (!buf->mem || vb2_plane_size(&buf->vb.vb2_buf, 0) < out_size) {
@@ -3483,7 +3497,7 @@ void video_data_process(struct work_struct *p_work)
             SetNoVideoMem(buf->mem, nWidth, nHeight);
         }
 
-        buf->vb.sequence = videodev->seqnr++;
+        buf->vb.sequence = frame_seq;
         /* every path above writes out_size bytes: scaled, rotated, native or no-signal */
         vb2_set_plane_payload(&buf->vb.vb2_buf, 0, out_size);
         hws_complete_buffer(ctx, buf, VB2_BUF_STATE_DONE);
@@ -4596,6 +4610,8 @@ static int MemCopyVideoToSteam(struct hws_pcie_dev *pdx,int nDecoder)
 				pdx->m_VideoInfo[nDecoder].pStatusInfo[nIndex].dwWidth = pdx->m_pVCAPStatus[nDecoder][0].dwWidth ;
 				pdx->m_VideoInfo[nDecoder].pStatusInfo[nIndex].dwHeight = pdx->m_pVCAPStatus[nDecoder][0].dwHeight;
 				pdx->m_VideoInfo[nDecoder].pStatusInfo[nIndex].dwinterlace = interlace;
+				pdx->m_VideoInfo[nDecoder].pStatusInfo[nIndex].tsNs = pdx->m_FrameEndNs[nDecoder];
+				pdx->m_VideoInfo[nDecoder].pStatusInfo[nIndex].seq = pdx->m_FrameSeq[nDecoder]++;
 				pdx->m_VideoInfo[nDecoder].pStatusInfo[nIndex].byLock = MEM_LOCK;
 
 				spin_unlock_irqrestore(&pdx->videoslock[nDecoder], flags);
@@ -5027,6 +5043,8 @@ static irqreturn_t irqhandler(int irq, void  *info)
 						tmp = (READ_REGISTER_ULONG(pdx,(CVBS_IN_BASE + (32+0) * PCIE_BARADDROFSIZE)))&0x01;
 						if(pdx->video_data[0] != tmp)
 						{
+							if(tmp == 0)	/* second half done: the frame is complete */
+								pdx->m_FrameEndNs[0] = ktime_get_ns();
 							pdx->video_data[0]= tmp;
 							pdx->m_nVideoBufferIndex[0]  = tmp;
 							tasklet_schedule(&pdx->dpc_video_tasklet[0]);  // tasklet_hi_schedule
@@ -5046,6 +5064,8 @@ static irqreturn_t irqhandler(int irq, void  *info)
 						tmp = (READ_REGISTER_ULONG(pdx,(CVBS_IN_BASE + (32+1) * PCIE_BARADDROFSIZE)))&0x01;
 						if(pdx->video_data[1] != tmp)
 						{
+							if(tmp == 0)	/* second half done: the frame is complete */
+								pdx->m_FrameEndNs[1] = ktime_get_ns();
 							pdx->m_nVideoBufferIndex[1] =  tmp;
 							pdx->video_data[1]= pdx->m_nVideoBufferIndex[1];
 							tasklet_schedule(&pdx->dpc_video_tasklet[1]);
@@ -5064,6 +5084,8 @@ static irqreturn_t irqhandler(int irq, void  *info)
 						tmp = (READ_REGISTER_ULONG(pdx,(+ CVBS_IN_BASE + (32+2) * PCIE_BARADDROFSIZE)))&0x01;
 						if(pdx->video_data[2] != tmp)
 						{
+							if(tmp == 0)	/* second half done: the frame is complete */
+								pdx->m_FrameEndNs[2] = ktime_get_ns();
 							pdx->m_nVideoBufferIndex[2] = tmp;
 							pdx->video_data[2]= pdx->m_nVideoBufferIndex[2];
 							tasklet_schedule(&pdx->dpc_video_tasklet[2]);
@@ -5082,6 +5104,8 @@ static irqreturn_t irqhandler(int irq, void  *info)
 						tmp = (READ_REGISTER_ULONG(pdx,(CVBS_IN_BASE + (32+3) * PCIE_BARADDROFSIZE)))&0x01;
 						if(pdx->video_data[3] != tmp)
 						{
+							if(tmp == 0)	/* second half done: the frame is complete */
+								pdx->m_FrameEndNs[3] = ktime_get_ns();
 							pdx->m_nVideoBufferIndex[3] = tmp;
 							pdx->video_data[3]= pdx->m_nVideoBufferIndex[3];
 							//printk("OnInterrupt-%x [1] %d\n", 3,video_data[3]);
