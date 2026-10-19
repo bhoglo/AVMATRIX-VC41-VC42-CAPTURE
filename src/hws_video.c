@@ -5284,9 +5284,14 @@ int MainKsThreadHandle(void *arg)
 		 * TASK_IDLE: ssleep() slept uninterruptibly, which counts toward
 		 * the load average and kept it 1.0 higher for as long as the
 		 * module was loaded. kthread_stop() still wakes this early.
-		 * Every 250 ms so resolution changes are noticed quickly.
+		 * Every 50 ms, as AVMatrix's Windows driver for the VC12-4K
+		 * polls: resolution changes
+		 * are seen sooner, and with no signal the blue frames come
+		 * faster than OBS's read timeout (5 frame periods, 83 ms at
+		 * 60 fps), which it otherwise hit repeatedly at every signal
+		 * change. Each poll is a few register reads.
 		 */
-		schedule_timeout_idle(HZ / 4);
+		schedule_timeout_idle(max_t(long, 1, msecs_to_jiffies(50)));
 	}
 	//printk("MainKsThreadHandle Exit");
 	return 0;
