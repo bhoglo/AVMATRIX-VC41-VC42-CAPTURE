@@ -273,7 +273,8 @@ static int hws_vidioc_querycap(struct file *file, void *priv, struct v4l2_capabi
 	//printk( "%s\n", __func__);
 	strcpy(cap->driver, KBUILD_MODNAME);
 	sprintf(cap->card, "%s %d",HWS_VIDEO_NAME,vi_index);
-	strcpy(cap->bus_info, "HWS");
+	/* unique per card, so apps can tell two cards apart */
+	snprintf(cap->bus_info, sizeof(cap->bus_info), "PCI:%s", pci_name(dev->pdev));
 	cap->device_caps =	V4L2_CAP_VIDEO_CAPTURE |V4L2_CAP_STREAMING;
 	cap->capabilities = cap->device_caps | V4L2_CAP_DEVICE_CAPS;
 	//printk( "%s(IN END  )\n", __func__);
@@ -640,13 +641,6 @@ static int vidioc_log_status(struct file *file, void *priv)
 	return 0;
 }
 
-static ssize_t hws_read(struct file *file,char *buf,size_t count, loff_t *ppos)
-{
-	//printk( "%s()\n", __func__);
-	return -1;
-
-}
-
 static inline struct hws_vfh_ctx *hws_ctx_from_file(struct file *file)
 {
     return container_of(file->private_data, struct hws_vfh_ctx, fh);
@@ -691,7 +685,7 @@ static int hws_open(struct file *file)
     q = &ctx->vbq;
     memset(q, 0, sizeof(*q));
     q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    q->io_modes = VB2_READ | VB2_MMAP | VB2_USERPTR;
+    q->io_modes = VB2_MMAP | VB2_USERPTR;	/* read() was never implemented */
     q->gfp_flags = GFP_KERNEL | __GFP_ZERO;//GFP_DMA32;
     q->drv_priv = ctx;
     q->buf_struct_size = sizeof(struct hwsvideo_buffer);
@@ -1331,7 +1325,6 @@ static const struct v4l2_file_operations hws_fops = {
     .owner          = THIS_MODULE,
     .open           = hws_open,
     .release        = hws_release,
-    .read           = hws_read,
     .poll           = hws_poll,
     .unlocked_ioctl = hws_unlocked_ioctl,
     .mmap           = hws_mmap,
@@ -3562,7 +3555,7 @@ int hws_video_register(struct hws_pcie_dev *dev)
 		video_set_drvdata(vdev, &(dev->video[i]));
 
 		q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		q->io_modes = VB2_READ | VB2_MMAP | VB2_USERPTR;
+		q->io_modes = VB2_MMAP | VB2_USERPTR;
 		//q->io_modes = VB2_MMAP | VB2_USERPTR | VB2_DMABUF | VB2_READ;
 		q->gfp_flags = GFP_DMA32;
 		//q->min_buffers_needed = 2;
