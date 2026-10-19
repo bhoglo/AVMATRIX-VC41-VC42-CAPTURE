@@ -373,6 +373,8 @@ struct hws_video{
 	bool					top_done;	/* the first half of the current frame is in place */
 	int						frame_w, frame_h, frame_il;	/* geometry at the first half */
 	int						frame_len[2];	/* bytes in each half (HLAF_SIZE, DWON_SIZE) */
+	bool					frame_hdcp;	/* HDCP was active at this frame's first half */
+	bool					hdcp_active;	/* last HDCP state the status thread logged */
 	int						Interlaced;
 	//------------------------
 	struct v4l2_ctrl_handler ctrl_hdl;

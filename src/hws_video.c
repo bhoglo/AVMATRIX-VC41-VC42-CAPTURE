@@ -30,6 +30,7 @@ struct hwsvideo_buffer;
 static void hws_complete_buffer(struct hwsvideo_buffer *buf, enum vb2_buffer_state state);
 static void hws_snap_regs(struct hws_pcie_dev *pdx, char what, int en);
 static int Get_Video_Status(struct hws_pcie_dev *pdx,unsigned int  ch);
+static bool hws_hdcp_active(struct hws_pcie_dev *pdx, int ch);
 static void WRITE_REGISTER_ULONG(struct hws_pcie_dev *pdx,u32 RegisterOffset,u32 Value);
 static u32 READ_REGISTER_ULONG(struct hws_pcie_dev *pdx,u32 RegisterOffset);
 static bool hws_any_queue_busy(struct hws_video *videodev);
@@ -533,6 +534,8 @@ static int hws_vidioc_enum_input(struct file *file, void *priv,struct v4l2_input
 		/* active but unusable (too large, odd width) reads as no sync */
 		i->status = (st != 0xFFFFFFFF && ((st >> videodev->index) & 1)) ?
 			    V4L2_IN_ST_NO_SYNC : V4L2_IN_ST_NO_SIGNAL;
+	} else if (hws_hdcp_active(pdx, videodev->index)) {
+		i->status = V4L2_IN_ST_NO_ACCESS;	/* HDCP: frames are delivered black */
 	}
 	return 0;
 }
@@ -1087,6 +1090,8 @@ static int hws_log_status(struct file *file, void *fh)
 	if (hws_input_timeperframe(pdx, videodev->index, &tpf))
 		v4l2_info(&videodev->v4l2_dev, "input frame interval: %u/%u s\n",
 			  tpf.numerator, tpf.denominator);
+	v4l2_info(&videodev->v4l2_dev, "HDCP: %s\n",
+		  hws_hdcp_active(pdx, videodev->index) ? "active (frames delivered black)" : "not active");
 	v4l2_info(&videodev->v4l2_dev, "output: %dx%d, frames: %u, dropped: %u, DMA buffers: %d KiB\n",
 		  videodev->current_out_width, videodev->curren_out_height,
 		  pdx->m_FrameSeq[videodev->index], pdx->m_FramesDropped[videodev->index],
@@ -3228,6 +3233,16 @@ static void FillYUU2(BYTE *pSrc,BYTE *pOut, int nw,int nh,int interlace)
  * Everything here runs under video->cap_lock.
  */
 
+/*
+ * Register 8: the source is using HDCP on channel @ch. Read only where the
+ * vendor's status poll reads it (Get_Video_Status: FPGA versions above 121).
+ */
+static bool hws_hdcp_active(struct hws_pcie_dev *pdx, int ch)
+{
+	return !pdx->m_PciDeviceLost && pdx->m_DeviceHW_Version &&
+	       (READ_REGISTER_ULONG(pdx, HWS_REG_HDCP_STATUS) >> ch) & 1;
+}
+
 /* the driver writes this word after reading a half; the card overwrites it when it refreshes the half */
 #define HWS_HALF_MARK 0x55AAAA55
 
@@ -3437,8 +3452,15 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 		v->frame_il = il;
 		v->frame_len[0] = hf;
 		v->frame_len[1] = down;
+		/*
+		 * Like the vendor's Windows driver, never pass on video while the
+		 * source uses HDCP: the frame is delivered black instead.
+		 */
+		v->frame_hdcp = hws_hdcp_active(pdx, ch);
 		hws_hold_buffers(v, pdx->m_FrameSeq[ch], out_size);
-		if (direct) {
+		if (v->frame_hdcp) {
+			/* nothing copied; the second half blanks the buffers */
+		} else if (direct) {
 			list_for_each_entry(buf, &v->frame_bufs, queue)
 				memcpy(buf->mem, src, hf);
 		} else if (!list_empty(&v->frame_bufs)) {
@@ -3457,7 +3479,16 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 		goto out;
 	}
 	v->top_done = false;
-	if (direct) {
+	if (v->frame_hdcp || hws_hdcp_active(pdx, ch)) {
+		list_for_each_entry(buf, &v->frame_bufs, queue) {
+			if (first) {
+				memcpy(buf->mem, first, out_size);
+			} else {
+				memset32(buf->mem, 0x80108010, out_size / 4);	/* YUYV black: Y 16, U/V 128 */
+				first = buf->mem;
+			}
+		}
+	} else if (direct) {
 		list_for_each_entry(buf, &v->frame_bufs, queue)
 			memcpy((BYTE *)buf->mem + hf, src, down);
 	} else if (!list_empty(&v->frame_bufs)) {
@@ -5221,8 +5252,15 @@ int MainKsThreadHandle(void *arg)
 		}
 		for(i=0; i<pdx->m_nCurreMaxVideoChl; i++)
 		{
+			bool hdcp = hws_hdcp_active(pdx, i);
+
 			if(pdx->video[i].fileindex > 0)
 				hws_check_source_change(&pdx->video[i]);
+			if (hdcp != pdx->video[i].hdcp_active) {
+				pdx->video[i].hdcp_active = hdcp;
+				dev_info(&pdx->pdev->dev, "input %d: HDCP %s\n", i,
+					 hdcp ? "active, delivering black frames" : "no longer active");
+			}
 		}
 		/*
 		 * TASK_IDLE: ssleep() slept uninterruptibly, which counts toward
@@ -5628,8 +5666,9 @@ static int hws_dbg_status_show(struct seq_file *m, void *unused)
 			seq_printf(m, "  input: %dx%d%s\n", w, h, il ? " interlaced" : "");
 		else
 			seq_puts(m, "  input: no usable signal\n");
-		seq_printf(m, "  measured frame interval: %llu ns, card register 110: %u fps\n",
-			   READ_ONCE(pdx->m_FrameIntervalNs[ch]), hws_hw_fps(pdx, ch));
+		seq_printf(m, "  measured frame interval: %llu ns, card register 110: %u fps, HDCP: %s\n",
+			   READ_ONCE(pdx->m_FrameIntervalNs[ch]), hws_hw_fps(pdx, ch),
+			   hws_hdcp_active(pdx, ch) ? "active" : "not active");
 		seq_printf(m, "  capture: %s, output %dx%d\n", pdx->m_bVCapStarted[ch] ? "running" : "stopped",
 			   v->current_out_width, v->curren_out_height);
 		seq_printf(m, "  frames: %u, lost: %u\n", READ_ONCE(pdx->m_FrameSeq[ch]),
