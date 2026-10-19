@@ -392,7 +392,16 @@ static void hws_fill_pix(struct v4l2_pix_format *pix, const framegrabber_pixfmt_
 	pix->pixelformat = fmt->fourcc;
 	pix->bytesperline = (pix->width * fmt->depth) >> 3;
 	pix->sizeimage = pix->height * pix->bytesperline;
-	pix->colorspace = V4L2_COLORSPACE_REC709;
+	/*
+	 * Measured on these cards by the in-kernel hws driver's author: the
+	 * samples are full-range Y'CbCr with a BT.601 matrix at every size.
+	 * The colorspace (primaries) follows the size, SD or HD. The default
+	 * quantization would mean limited range for YUV.
+	 */
+	pix->colorspace = pix->height <= 576 ? V4L2_COLORSPACE_SMPTE170M : V4L2_COLORSPACE_REC709;
+	pix->ycbcr_enc = V4L2_YCBCR_ENC_601;
+	pix->quantization = V4L2_QUANTIZATION_FULL_RANGE;
+	pix->xfer_func = V4L2_XFER_FUNC_DEFAULT;
 	pix->priv = 0;
 }
 
