@@ -430,6 +430,28 @@ static int hws_vidioc_try_fmt_vid_cap(struct file *file, void *fh, struct v4l2_f
 	//----------------------------------
 	return 0;
 }
+/*
+ * All consumers share one output format, and the worker copies frames sized
+ * by it into every consumer's buffers. Changing it while any consumer holds
+ * buffers would make those copies overrun the smaller buffers.
+ */
+static bool hws_any_queue_busy(struct hws_video *videodev)
+{
+	struct hws_vfh_ctx *ctx;
+	unsigned long flags;
+	bool busy = false;
+
+	spin_lock_irqsave(&videodev->consumers_lock, flags);
+	list_for_each_entry(ctx, &videodev->consumers, node) {
+		if (vb2_is_busy(&ctx->vbq)) {
+			busy = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&videodev->consumers_lock, flags);
+	return busy;
+}
+
 static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,struct v4l2_format *f)
 {
 	struct hws_video *videodev = video_drvdata(file);
@@ -445,9 +467,11 @@ static int vidioc_s_fmt_vid_cap(struct file *file, void *priv,struct v4l2_format
 	nVideoFmtIndex = v4l2_get_suport_VideoFormatIndex(f);
 	if(nVideoFmtIndex ==-1) return -EINVAL;
 
-	err = hws_vidioc_try_fmt_vid_cap(file, priv, f);
-	if (0 != err)
-		return err;
+	if ((f->fmt.pix.width != videodev->current_out_width ||
+	     f->fmt.pix.height != videodev->curren_out_height ||
+	     f->fmt.pix.pixelformat != videodev->pixfmt) && hws_any_queue_busy(videodev))
+		return -EBUSY;
+
 	spin_lock_irqsave(&pdx->videoslock[videodev->index], flags);
 	videodev->current_out_size_index = nVideoFmtIndex;
 	videodev->pixfmt     = f->fmt.pix.pixelformat;
@@ -3332,7 +3356,7 @@ void video_data_process(struct work_struct *p_work)
         buf->vb.vb2_buf.timestamp = ktime_get_ns();
         buf->vb.field = V4L2_FIELD_NONE;
 
-        if (!buf->mem) {
+        if (!buf->mem || vb2_plane_size(&buf->vb.vb2_buf, 0) < out_size) {
             vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
             continue;
         }
@@ -3442,6 +3466,8 @@ void video_data_process(struct work_struct *p_work)
         }
 
         buf->vb.sequence = videodev->seqnr++;
+        /* every path above writes out_size bytes: scaled, rotated, native or no-signal */
+        vb2_set_plane_payload(&buf->vb.vb2_buf, 0, out_size);
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
     }
 	vexit:
