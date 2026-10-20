@@ -3335,8 +3335,12 @@ static void FillYUU2(BYTE *pSrc,BYTE *pOut, int nw,int nh,int interlace)
  */
 static bool hws_hdcp_active(struct hws_pcie_dev *pdx, int ch)
 {
-	return !pdx->m_PciDeviceLost && pdx->m_DeviceHW_Version &&
-	       (READ_REGISTER_ULONG(pdx, HWS_REG_HDCP_STATUS) >> ch) & 1;
+	u32 v;
+
+	if (pdx->m_PciDeviceLost || !pdx->m_DeviceHW_Version)
+		return false;
+	v = READ_REGISTER_ULONG(pdx, HWS_REG_HDCP_STATUS);
+	return v != 0xFFFFFFFF && ((v >> ch) & 1);	/* all ones: the card isn't answering */
 }
 
 /* the driver writes this word after reading a half; the card overwrites it when it refreshes the half */
