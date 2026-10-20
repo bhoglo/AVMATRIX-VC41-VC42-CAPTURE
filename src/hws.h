@@ -465,6 +465,7 @@ struct hws_pcie_dev {
 	u32       m_dwAudioPTKSize;
 	//-----------------------------
 	int m_dwSWFrameRate[MAX_VID_CHANNELS];
+	u32 m_UnsupportedRes[MAX_VID_CHANNELS];	/* last unsupported input size warned about, w<<16|h */
 
 	ULONG m_contrast[MAX_VID_CHANNELS];
 	ULONG m_brightness[MAX_VID_CHANNELS];

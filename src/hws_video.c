@@ -3910,6 +3910,16 @@ static int SetVideoFormteSize(struct hws_pcie_dev *pdx,int ch,int w,int h)
 		hf_size = hf_size*16*128;
 		down_size = ((w*h*5)/4)-hf_size;
 	}
+	/*
+	 * The card DMAs both halves of a frame into the channel's buffer, whose
+	 * last MAX_AUDIO_CAP_SIZE bytes hold the audio ring. A frame that does
+	 * not fit would be written past the buffer, so never program it.
+	 */
+	if(hf_size < 0 || down_size < 0 ||
+	   hf_size + down_size > pdx->m_MaxHWVideoBufferSize - MAX_AUDIO_CAP_SIZE)
+	{
+		return -1;
+	}
 	pdx->m_format[ch].dwWidth = w;		 // Image Width
 	pdx->m_format[ch].dwWidth = w;		 // Image Width
 	pdx->m_format[ch].HLAF_SIZE = hf_size;
@@ -5158,11 +5168,15 @@ static void SetDMAAddress(struct hws_pcie_dev *pdx)
 }
 
 //-----------------------------------
-static void ChangeVideoSize(struct hws_pcie_dev *pdx,int ch,int w,int h,int interlace)
+static int ChangeVideoSize(struct hws_pcie_dev *pdx,int ch,int w,int h,int interlace)
 {
 	int j;
 	int halfframeLength;
 	unsigned long flags;
+	if(SetVideoFormteSize(pdx,ch,w,h) != 1)
+	{
+		return -1;
+	}
 	spin_lock_irqsave(&pdx->videoslock[ch], flags);
 	for (j = 0; j<MAX_VIDEO_QUEUE; j++)
 	{
@@ -5172,9 +5186,9 @@ static void ChangeVideoSize(struct hws_pcie_dev *pdx,int ch,int w,int h,int inte
 
 	}
 	spin_unlock_irqrestore(&pdx->videoslock[ch], flags);
-	SetVideoFormteSize(pdx,ch,w,h);
 	halfframeLength = pdx->m_format[ch].HLAF_SIZE/16;
 	WRITE_REGISTER_ULONG(pdx,(DWORD)(CBVS_IN_BUF_BASE2 + (ch*PCIE_BARADDROFSIZE)), halfframeLength); //Buffer 1 address
+	return 0;
 }
 
 static int Get_Video_Status(struct hws_pcie_dev *pdx,unsigned int  ch)
@@ -5299,16 +5313,26 @@ static int Get_Video_Status(struct hws_pcie_dev *pdx,unsigned int  ch)
 		value =  READ_REGISTER_ULONG(pdx,(DWORD)(CVBS_IN_BASE + (offset*PCIE_BARADDROFSIZE)));
 		res_w = value&0xFFFF;
 		res_h = (value>>16)&0xFFFF;
+		no_video = 0;
 		if(((res_w <=MAX_VIDEO_HW_W) &&(res_h<=MAX_VIDEO_HW_H)&&(interlace==0))||((res_w <=MAX_VIDEO_HW_W) &&(res_h*2<=MAX_VIDEO_HW_H)&&(interlace==1)))
 		{
 			if((res_w !=pdx->m_pVCAPStatus[ch][0].dwWidth )||(res_h!= pdx->m_pVCAPStatus[ch][0].dwHeight)||(pdx->m_pVCAPStatus[ch][0].dwinterlace!=interlace))
 			{
-				ChangeVideoSize(pdx,ch,res_w,res_h,interlace);
-
+				if(ChangeVideoSize(pdx,ch,res_w,res_h,interlace) < 0)
+					no_video = 1;
 			}
 		}
-
-		no_video = 0;
+		else
+		{
+			/* capturing it with the previous size's DMA lengths would deliver garbage */
+			no_video = 1;
+		}
+		if(no_video && pdx->m_UnsupportedRes[ch] != (((u32)res_w<<16)|res_h))
+		{
+			pdx->m_UnsupportedRes[ch] = ((u32)res_w<<16)|res_h;
+			dev_warn(&pdx->pdev->dev, "channel %d: unsupported input %dx%d%s, showing no-signal frames\n",
+				 ch, res_w, res_h, interlace ? "i" : "p");
+		}
 		//printk("[MV-X1]-[ch-%d]W=%d H=%d interlace =%d %dx%d \n",ch,res_w,res_h,interlace,pdx->m_pVCAPStatus[ch][0].dwWidth, pdx->m_pVCAPStatus[ch][0].dwHeight);
 	}
 	else
