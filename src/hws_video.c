@@ -29,6 +29,7 @@ static bool hws_input_timeperframe(struct hws_pcie_dev *pdx, int ch, struct v4l2
 struct hwsvideo_buffer;
 static void hws_complete_buffer(struct hwsvideo_buffer *buf, enum vb2_buffer_state state);
 static void hws_snap_regs(struct hws_pcie_dev *pdx, char what, int en);
+static int Get_Video_Status(struct hws_pcie_dev *pdx,unsigned int  ch);
 static void WRITE_REGISTER_ULONG(struct hws_pcie_dev *pdx,u32 RegisterOffset,u32 Value);
 static u32 READ_REGISTER_ULONG(struct hws_pcie_dev *pdx,u32 RegisterOffset);
 static bool hws_any_queue_busy(struct hws_video *videodev);
@@ -1556,6 +1557,13 @@ static int hws_start_streaming_multi(struct vb2_queue *q, unsigned int count)
         mutex_lock(&videodev->cap_lock);
         videodev->dev->m_FrameSeq[videodev->index] = 0;
         videodev->top_done = false;
+        /*
+         * Program the DMA lengths for the live input now, not at the next
+         * status poll: until then the card DMAs the frame with the old
+         * lengths (the 1920x1080 default after probe).
+         */
+        videodev->dev->m_curr_No_Video[videodev->index] =
+            Get_Video_Status(videodev->dev, videodev->index);
         mutex_unlock(&videodev->cap_lock);
         StartVideoCapture(videodev->dev, videodev->index);
     }
