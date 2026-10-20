@@ -35,6 +35,13 @@ static void WRITE_REGISTER_ULONG(struct hws_pcie_dev *pdx,u32 RegisterOffset,u32
 static u32 READ_REGISTER_ULONG(struct hws_pcie_dev *pdx,u32 RegisterOffset);
 static bool hws_any_queue_busy(struct hws_video *videodev);
 static void hws_check_source_change(struct hws_video *videodev);
+/*
+ * Debug-only DMA checks, read at load: the register snapshots in debugfs
+ * regsnaps. Off by default.
+ */
+static bool debug_dma;
+module_param(debug_dma, bool, 0444);
+MODULE_PARM_DESC(debug_dma, "enable the DMA register snapshots (default off)");
 
 //------------------------
 
@@ -5713,7 +5720,7 @@ static void hws_snap_regs(struct hws_pcie_dev *pdx, char what, int en)
 	unsigned long flags;
 	int i;
 
-	if (pdx->m_PciDeviceLost || !pdx->map_bar0_addr)
+	if (!debug_dma || pdx->m_PciDeviceLost || !pdx->map_bar0_addr)
 		return;
 	s.ts = ktime_get_ns();
 	s.what = what;
@@ -5871,7 +5878,8 @@ static void hws_debugfs_init(struct hws_pcie_dev *pdx)
 	pdx->dbg = debugfs_create_dir(name, NULL);
 	debugfs_create_file("status", 0444, pdx->dbg, pdx, &hws_dbg_status_fops);
 	debugfs_create_file("dma", 0444, pdx->dbg, pdx, &hws_dbg_dma_fops);
-	debugfs_create_file("regsnaps", 0444, pdx->dbg, pdx, &hws_dbg_regsnaps_fops);
+	if (debug_dma)
+		debugfs_create_file("regsnaps", 0444, pdx->dbg, pdx, &hws_dbg_regsnaps_fops);
 }
 
 static int hws_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
