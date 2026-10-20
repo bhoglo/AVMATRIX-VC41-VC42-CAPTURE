@@ -70,6 +70,7 @@
 #include <linux/semaphore.h>   
 #include <linux/sched.h>    
 #include <linux/wait.h>   
+#include <linux/kfifo.h>
 
 
 //---------------------------------------------
@@ -112,10 +113,9 @@
 #define TRUE 1
 #define FALSE 0
 #endif 
-/* frame-queue slot states (VCAP_STATUS_INFO.byLock), changed under videoslock */
-#define MEM_LOCK					1	/* READY: a complete frame nobody has read */
-#define MEM_UNLOCK					0	/* FREE: the tasklet may write it */
-#define MEM_READING					2	/* the worker is copying from it */
+/* audio queue slot states (ACAP_STATUS_INFO.byLock) */
+#define MEM_LOCK					1	/* holds a packet nobody has read */
+#define MEM_UNLOCK					0	/* free */
 
 
 typedef unsigned int DWORD;
@@ -207,23 +207,22 @@ typedef struct TAG_VCAP_STATUS_INFO
 	DWORD       dwOutFrameRate;
 	DWORD	    dwinterlace;
 	DWORD       dwhdcp;
-	u64         tsNs;	/* CLOCK_MONOTONIC at the frame-end interrupt */
-	u32         seq;	/* per-channel frame number */
 }VCAP_STATUS_INFO, *PVCAP_STATUS_INFO;
 typedef struct 
 {
-	uint8_t		*m_pVideoBufData[MAX_VIDEO_QUEUE];
-	uint8_t		*m_pVideoBufData1[MAX_VIDEO_QUEUE];
-	uint8_t		*m_pVideoBufData2[MAX_VIDEO_QUEUE];
-	uint8_t		*m_pVideoBufData3[MAX_VIDEO_QUEUE];
-	int         m_VideoBufferSize[4];
-	VCAP_STATUS_INFO pStatusInfo[MAX_VIDEO_QUEUE];
-	DWORD        m_nVideoIndex;
+	BYTE		*m_pVideoStaging;	/* raw frame, when it needs converting, deinterlacing, scaling or rotating */
 	BYTE		*m_pVideoScalerBuf;
 	BYTE        *m_pVideoYUV2Buf;
 	BYTE        *m_pRotateVideoBuf;
 	DWORD		dwisRuning;
 }ACAP_VIDEO_INFO, *PACAP_VIDEO_INFO;
+
+/* one half-frame completion, queued by the hard IRQ handler */
+struct hws_half_event {
+	u64	ts;	/* CLOCK_MONOTONIC when the interrupt arrived */
+	u8	ch;	/* input channel */
+	u8	half;	/* 1: first half done; 0: second half done, frame complete */
+};
 
 typedef struct 
 {
@@ -324,6 +323,9 @@ struct hws_vfh_ctx {
     wait_queue_head_t   inflight_wq; /* stop_streaming waits here for inflight == 0 */
     u32                 decimate;    /* deliver every Nth input frame (S_PARM), 1..4 */
     u32                 next_seq;    /* first frame sequence this consumer still wants */
+    struct hwsvideo_buffer *held;    /* buffer receiving the current frame, under video->cap_lock */
+    u32                 delivered;   /* frames completed into this consumer's buffers */
+    u32                 missed;      /* frames it wanted but had no buffer queued for */
     struct hws_video   *video;
     struct list_head    node;        /* link into video->consumers */
 };
@@ -348,7 +350,17 @@ struct hws_video{
 	v4l2_std_id				std;  //V4L2_STD_NTSC_M
 	u32						pixfmt; //V4L2_PIX_FMT_YUYV(fourcc)
 	int						index;
-	struct work_struct		videowork;
+	/*
+	 * Frame assembly. The IRQ thread copies each half of a frame straight
+	 * into one buffer per consumer (frame_bufs, linked through
+	 * hwsvideo_buffer.queue); cap_lock also serialises the status thread's
+	 * no-signal frames and input-size changes, and stop_streaming.
+	 */
+	struct mutex			cap_lock;
+	struct list_head		frame_bufs;
+	bool					top_done;	/* the first half of the current frame is in place */
+	int						frame_w, frame_h, frame_il;	/* geometry at the first half */
+	int						frame_len[2];	/* bytes in each half (HLAF_SIZE, DWON_SIZE) */
 	int						Interlaced;
 	//------------------------
 	struct v4l2_ctrl_handler ctrl_hdl;
@@ -403,10 +415,10 @@ struct hws_pcie_dev {
 	spinlock_t				audiolock[MAX_VID_CHANNELS];
 	//----------------------------
 	u32 *map_bar0_addr;
-	struct workqueue_struct *wq;
 	struct workqueue_struct *auwq;
-	unsigned long video_data[MAX_VID_CHANNELS];
- 	struct tasklet_struct dpc_video_tasklet[MAX_VID_CHANNELS];
+	/* half-frame completions from the hard IRQ handler to the IRQ thread, all channels */
+	DECLARE_KFIFO(half_events, struct hws_half_event, 32);
+	int video_toggle[MAX_VID_CHANNELS];	/* last half-frame toggle seen */
  	unsigned long audio_data[MAX_VID_CHANNELS];
  	struct tasklet_struct dpc_audio_tasklet[MAX_VID_CHANNELS];
 	//-----------------------------
@@ -448,7 +460,6 @@ struct hws_pcie_dev {
 	VIDEO_INFO      	m_format[MAX_VID_CHANNELS];
 	
 	ACAP_AUDIO_INFO     m_AudioInfo[MAX_VID_CHANNELS];
-	uint8_t				m_bChangeVideoSize[MAX_VID_CHANNELS];
 	
 	struct task_struct *mMain_tsk; 
 	int m_curr_No_Video[MAX_VID_CHANNELS];
@@ -464,15 +475,9 @@ struct hws_pcie_dev {
 	u32		m_dwAudioBufferHigh[MAX_VID_CHANNELS];
 	uint8_t m_bVCapStarted[MAX_VID_CHANNELS];
 	uint8_t	 m_bACapStarted[MAX_VID_CHANNELS];
-	uint8_t     m_nVideoBusy[MAX_VID_CHANNELS];
-	uint8_t   m_bVideoStop[MAX_VID_CHANNELS];
-	//int       m_nVideoIndex[MAX_VID_CHANNELS];
-	int       m_nRDVideoIndex[MAX_VID_CHANNELS];
-	int        m_nVideoBufferIndex[MAX_VID_CHANNELS];
-	int       m_nVideoHalfDone[MAX_VID_CHANNELS];
 	u64       m_FrameEndNs[MAX_VID_CHANNELS];	/* set by irqhandler at the frame-end half */
-	u32       m_FrameSeq[MAX_VID_CHANNELS];	/* next frame number, under videoslock */
-	u32       m_FramesDropped[MAX_VID_CHANNELS];	/* READY frames overwritten or skipped */
+	u32       m_FrameSeq[MAX_VID_CHANNELS];	/* next frame number, under video->cap_lock */
+	u32       m_FramesDropped[MAX_VID_CHANNELS];	/* captured frames lost: a half missing or stale */
 	/* input frame rate, measured from frame-end interrupts over ~1 s windows */
 	u64       m_RateWinStartNs[MAX_VID_CHANNELS];
 	u32       m_RateWinFrames[MAX_VID_CHANNELS];
@@ -484,8 +489,6 @@ struct hws_pcie_dev {
 	uint8_t   m_nAudioBusy[MAX_VID_CHANNELS];
 	uint8_t   m_nAudioBufferIndex[MAX_VID_CHANNELS];
 	uint8_t	  m_pAudioEvent[MAX_VID_CHANNELS];
-	uint8_t		m_pVideoEvent[MAX_VID_CHANNELS];
-	uint8_t		m_bVCapIntDone[MAX_VID_CHANNELS];
 	uint8_t m_bAudioRun[MAX_VID_CHANNELS];
 	uint8_t m_bAudioStop[MAX_VID_CHANNELS];
 	int       m_nRDAudioIndex[MAX_VID_CHANNELS];
