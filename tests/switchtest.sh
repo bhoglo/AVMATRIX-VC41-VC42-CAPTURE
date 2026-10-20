@@ -18,6 +18,8 @@ CH=${CH:-0}
 DEV=${DEV:-/dev/video0}
 BDF=${BDF:-$(basename "$(ls -d /sys/bus/pci/drivers/HwsCapture/0000:* 2>/dev/null | head -1)")}
 [ -n "$BDF" ] || { echo "no card bound to HwsCapture"; exit 1; }
+# BDF= may name another card, but never a device this driver doesn't own
+[ -e "/sys/bus/pci/drivers/HwsCapture/$BDF" ] || { echo "$BDF is not bound to HwsCapture"; exit 1; }
 DBG=/sys/kernel/debug/hws-$BDF
 w=${1:?width} h=${2:?height} want=${3:-40}
 OUT=$(mktemp -d)
