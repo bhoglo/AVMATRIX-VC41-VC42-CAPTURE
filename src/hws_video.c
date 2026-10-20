@@ -6110,6 +6110,7 @@ static int hws_probe(struct pci_dev *pdev, const struct pci_device_id *pci_id)
 	return 0;
 
 err_video:
+	StopKSThread(gdev);	/* it updates the video controls; a no-op when reached again below */
 	hws_unregister_video(gdev);
 err_thread:
 	StopKSThread(gdev);
