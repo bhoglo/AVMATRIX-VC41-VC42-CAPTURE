@@ -5052,7 +5052,18 @@ static irqreturn_t irqhandler(int irq, void  *info)
 					}
 				}
 				//--------------
-				Int_Value = Int_Value&0x00ffffff;
+				/*
+				 * Acknowledge exactly the bits that are set. Int_Value was
+				 * summed across passes (0x01 + 0x01 = 0x02 on a second pass),
+				 * which acknowledged the wrong bit, and bits other than the
+				 * channels' video (0-3) and audio (8-11) ones were never
+				 * acknowledged, although the driver enables every source.
+				 */
+				if (IntState & ~0xF0Fu) {
+					pdx->irq_unknown++;
+					pdx->irq_unknown_bits |= IntState & ~0xF0Fu;
+				}
+				Int_Value = IntState & 0x00ffffff;
 				WRITE_REGISTER_ULONG(pdx,(u32)(0x4000 + (PCIE_BARADDROFSIZE * 1)), Int_Value);
 				IntState= READ_REGISTER_ULONG(pdx,(u32)(CVBS_IN_BASE + 1 * PCIE_BARADDROFSIZE));
 				if(IntState == 0) break;
@@ -5869,9 +5880,10 @@ static int hws_dbg_status_show(struct seq_file *m, void *unused)
 	unsigned long flags;
 	int ch, w, h, il, n;
 
-	seq_printf(m, "interrupts: %u, video halves: %u, audio packets: %u, half queue full: %u\n",
+	seq_printf(m, "interrupts: %u, video halves: %u, audio packets: %u, half queue full: %u, other sources: %u (bits %#x)\n",
 		   READ_ONCE(pdx->irq_total), READ_ONCE(pdx->irq_video),
-		   READ_ONCE(pdx->irq_audio), READ_ONCE(pdx->irq_fifo_full));
+		   READ_ONCE(pdx->irq_audio), READ_ONCE(pdx->irq_fifo_full),
+		   READ_ONCE(pdx->irq_unknown), READ_ONCE(pdx->irq_unknown_bits));
 	for (ch = 0; ch < pdx->m_nCurreMaxVideoChl; ch++) {
 		struct hws_video *v = &pdx->video[ch];
 
