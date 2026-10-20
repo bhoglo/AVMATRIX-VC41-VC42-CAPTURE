@@ -5441,8 +5441,11 @@ int MainKsThreadHandle(void *arg)
 	int need_check=0;
 	int i=0;
 	struct hws_pcie_dev *pdx = (struct hws_pcie_dev *)(arg);
+
+	set_freezable();	/* don't poll a card that system sleep has powered down */
 	while(!kthread_should_stop())
 	{
+		try_to_freeze();
 		hws_do_reinit(pdx);
 
 		need_check=0;
