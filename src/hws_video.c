@@ -4631,6 +4631,12 @@ static int  StartAudioCapture(struct hws_pcie_dev *pdx,int index)
 	{
 		pdx->m_AudioInfo[index].pStatusInfo[j].byLock = MEM_UNLOCK;
 	}
+	/*
+	 * After an enable the VC12-4K first sends one or two packets it
+	 * captured before the last disable, heard as a blip of old sound. Drop
+	 * them; the silence fill covers the 43 ms.
+	 */
+	pdx->m_AudioSkip[index] = HWS_AUDIO_STALE_PKTS;
 	pdx->m_AudioInfo[index].dwisRuning =1;
 	EnableAudioCapture(pdx,index,1);
 	return 0;
@@ -4737,6 +4743,10 @@ int MemCopyAudioToSteam( struct hws_pcie_dev  *pdx,int dwAudioCh)
 
 	//-----------------------------------------------------
 	nIndex = -1;
+	if (pdx->m_AudioSkip[dwAudioCh]) {
+		pdx->m_AudioSkip[dwAudioCh]--;	/* stale, see StartAudioCapture() */
+		return 0;
+	}
 	if(pdx->m_AudioInfo[dwAudioCh].dwisRuning ==1)
 	{
 		for( i = pdx->m_AudioInfo[dwAudioCh].m_nAudioIndex;i<MAX_AUDIO_QUEUE;i++)
