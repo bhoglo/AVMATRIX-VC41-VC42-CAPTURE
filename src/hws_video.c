@@ -7,7 +7,6 @@
 #include <media/v4l2-device.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-vmalloc.h>
-#include <media/videobuf2-dma-contig.h>
 #include "hws.h"
 #include "hws_reg.h"
 #include <sound/core.h>
