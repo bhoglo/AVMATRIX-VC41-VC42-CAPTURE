@@ -3920,249 +3920,115 @@ static int SetVideoFormteSize(struct hws_pcie_dev *pdx,int ch,int w,int h)
 
 }
 
+/*
+ * The frame-queue and audio slot buffers are only touched by the CPU, so
+ * they need no physical contiguity: kvzalloc falls back to vmalloc instead
+ * of failing a 4 MiB (order-10) kmalloc once memory is fragmented.
+ */
 static void DmaMemFreePool(struct hws_pcie_dev *pdx)
 {
-	//Trace t("DmaMemFreePool()");
-	int					i	= 0,k;
+	int k, index;
+	if(pdx->m_bBufferAllocate != TRUE)
+		return;
 
-	unsigned long phyvirt_addr;
-	if(pdx->m_bBufferAllocate == TRUE)
+	for(index=0; index<pdx->m_nMaxChl; index++)
 	{
-		//---------------
-		for(i=0; i<pdx->m_nMaxChl; i++)
+		if(pdx->m_pbyVideoBuffer[index])
 		{
-			if(pdx->m_pbyVideoBuffer[i])
-			{
-				//printk("DmaMemFreePool ::m_pbyVideoBuffer = %p\n",  pdx->m_pbyVideoBuffer[i]);
-				#if 0
-				for (phyvirt_addr=(unsigned long)pdx->m_pbyVideoBuffer_area[i]; phyvirt_addr < ((unsigned long)pdx->m_pbyVideoBuffer_area[i] + pdx->m_MaxHWVideoBufferSize);phyvirt_addr+=PAGE_SIZE)
-				{
-				// clear all pages
-				ClearPageReserved(virt_to_page(phyvirt_addr));
-			}
-			kfree(pdx->m_pbyVideoBuffer[i]);
-			#else
-			dma_free_coherent(&pdx->pdev->dev, pdx->m_MaxHWVideoBufferSize, pdx->m_pbyVideoBuffer[i], pdx->m_pbyVideo_phys[i]);
-			#endif
-			pdx->m_pbyVideoBuffer[i] = NULL;
-			}
+			dma_free_coherent(&pdx->pdev->dev, pdx->m_MaxHWVideoBufferSize, pdx->m_pbyVideoBuffer[index], pdx->m_pbyVideo_phys[index]);
+			pdx->m_pbyVideoBuffer[index] = NULL;
 		}
-		for(i=0; i<pdx->m_nCurreMaxVideoChl;i++)
-		{
-			if(pdx->m_VideoInfo[i].m_pVideoScalerBuf !=NULL)
-			{
-				vfree(pdx->m_VideoInfo[i].m_pVideoScalerBuf);
-				pdx->m_VideoInfo[i].m_pVideoScalerBuf = NULL;
-			}
-
-			if(pdx->m_VideoInfo[i].m_pVideoYUV2Buf !=NULL)
-			{
-				vfree(pdx->m_VideoInfo[i].m_pVideoYUV2Buf);
-				pdx->m_VideoInfo[i].m_pVideoYUV2Buf = NULL;
-			}
-
-			if(pdx->m_VideoInfo[i].m_pRotateVideoBuf !=NULL)
-			{
-				vfree(pdx->m_VideoInfo[i].m_pRotateVideoBuf);
-				pdx->m_VideoInfo[i].m_pRotateVideoBuf = NULL;
-			}
-			for( k=0; k<MAX_VIDEO_QUEUE;k++)
-			{
-				if(pdx->m_VideoInfo[i].m_pVideoBufData[k])
-				{
-					for (phyvirt_addr=(unsigned long)pdx->m_VideoInfo[i].m_pVideoData_area[k]; phyvirt_addr < ((unsigned long)pdx->m_VideoInfo[i].m_pVideoData_area[k] + pdx->m_MaxHWVideoBufferSize);phyvirt_addr+=PAGE_SIZE)
-					{
-						// clear all pages
-						ClearPageReserved(virt_to_page(phyvirt_addr));
-					}
-					kfree(pdx->m_VideoInfo[i].m_pVideoBufData[k]);
-					pdx->m_VideoInfo[i].m_pVideoBufData[k]= NULL;
-				}
-			}
-			//----audio release
-			for( k=0; k<MAX_AUDIO_QUEUE;k++)
-			{
-				if(pdx->m_AudioInfo[i].m_pAudioBufData[k])
-				{
-					for (phyvirt_addr=(unsigned long)pdx->m_AudioInfo[i].m_pAudioData_area[k]; phyvirt_addr < ((unsigned long)pdx->m_AudioInfo[i].m_pAudioData_area[k] + pdx->m_dwAudioPTKSize);phyvirt_addr+=PAGE_SIZE)
-					{
-						// clear all pages
-						ClearPageReserved(virt_to_page(phyvirt_addr));
-					}
-					kfree(pdx->m_AudioInfo[i].m_pAudioBufData[k]);
-					pdx->m_AudioInfo[i].m_pAudioBufData[k] = NULL;
-				}
-			}
-
-		}
-		pdx->m_bBufferAllocate = FALSE;
 	}
+	for(index=0; index<pdx->m_nCurreMaxVideoChl; index++)
+	{
+		vfree(pdx->m_VideoInfo[index].m_pVideoScalerBuf);
+		pdx->m_VideoInfo[index].m_pVideoScalerBuf = NULL;
+		vfree(pdx->m_VideoInfo[index].m_pVideoYUV2Buf);
+		pdx->m_VideoInfo[index].m_pVideoYUV2Buf = NULL;
+		vfree(pdx->m_VideoInfo[index].m_pRotateVideoBuf);
+		pdx->m_VideoInfo[index].m_pRotateVideoBuf = NULL;
+		for(k=0; k<MAX_VIDEO_QUEUE; k++)
+		{
+			kvfree(pdx->m_VideoInfo[index].m_pVideoBufData[k]);
+			pdx->m_VideoInfo[index].m_pVideoBufData[k] = NULL;
+		}
+		for(k=0; k<MAX_AUDIO_QUEUE; k++)
+		{
+			kfree(pdx->m_AudioInfo[index].m_pAudioBufData[k]);
+			pdx->m_AudioInfo[index].m_pAudioBufData[k] = NULL;
+		}
+	}
+	pdx->m_bBufferAllocate = FALSE;
 }
 
-
-static int  DmaMemAllocPool(struct hws_pcie_dev *pdx)
+static int DmaMemAllocPool(struct hws_pcie_dev *pdx)
 {
-	u32			status	= 0;
-	uint8_t				i,k;
+	uint8_t i, k;
+	int index;
 	dma_addr_t phy_addr;
 
-	unsigned long phyvirt_addr;
 	if(pdx->m_bBufferAllocate == TRUE)
 	{
 		DmaMemFreePool(pdx);
 	}
+	/* from here on a failure frees whatever was allocated */
+	pdx->m_bBufferAllocate = TRUE;
 	//------------
 	for(i=0; i<pdx->m_nMaxChl; i++)
 	{
-
-		//printk("kmalloc [%d]size=%X************\n", i,pdx->m_MaxHWVideoBufferSize);
 		pdx->m_pbyVideoBuffer[i] = dma_alloc_coherent(&pdx->pdev->dev, pdx->m_MaxHWVideoBufferSize, &pdx->m_pbyVideo_phys[i], GFP_KERNEL);
-
-
 		if(pdx->m_pbyVideoBuffer[i]== NULL)
 		{
 			printk("m_pbyVideoBuffer[%d] mem Allocate Fail ************\n", i);
-			pdx->m_bBufferAllocate = TRUE;
-			DmaMemFreePool(pdx);
-			pdx->m_bBufferAllocate = FALSE;
-			status = -1;
-			return status;
+			goto fail;
 		}
-		#if 0
-		pdx->m_pbyVideoBuffer_area[i] = (char *)(((unsigned long)pdx->m_pbyVideoBuffer[i] + PAGE_SIZE -1) & PAGE_MASK);
-		for (phyvirt_addr=(unsigned long)pdx->m_pbyVideoBuffer_area[i]; phyvirt_addr < ((unsigned long)pdx->m_pbyVideoBuffer_area[i] + (pdx->m_MaxHWVideoBufferSize));
-		phyvirt_addr+=PAGE_SIZE)
-		{
-		// reserve all pages to make them remapable
-		SetPageReserved(virt_to_page(phyvirt_addr));
-	}
-	memset(pdx->m_pbyVideoBuffer[i] , 0x0,(pdx->m_MaxHWVideoBufferSize) );
-	phy_addr= (dma_addr_t)virt_to_phys(pdx->m_pbyVideoBuffer[i]);
-	pdx->m_pbyVideo_phys[i] = phy_addr;
-	#else
-	phy_addr = 	pdx->m_pbyVideo_phys[i];
-	#endif
-	//printk("PHY= %X=%X\n",phy_addr,pdx->m_pbyVideo_phys[i]);
+		phy_addr = pdx->m_pbyVideo_phys[i];
+		pdx->m_dwVideoBuffer[i] = 	  ((u64)phy_addr)&0xFFFFFFFF;
+		pdx->m_dwVideoHighBuffer[i] = ((u64)phy_addr>>32)&0xFFFFFFFF;
 
-	pdx->m_dwVideoBuffer[i] = 	  ((u64)phy_addr)&0xFFFFFFFF;
-	pdx->m_dwVideoHighBuffer[i] = ((u64)phy_addr>>32)&0xFFFFFFFF;;
-
-	pdx->m_pbyAudioBuffer[i] = (BYTE *)(pdx->m_pbyVideoBuffer[i] + pdx->m_MaxHWVideoBufferSize -MAX_AUDIO_CAP_SIZE );
-	#if 0
-	phy_addr= (dma_addr_t)virt_to_phys(pdx->m_pbyAudioBuffer[i]);
-	#else
-	phy_addr = pdx->m_pbyVideo_phys[i] + (pdx->m_MaxHWVideoBufferSize -MAX_AUDIO_CAP_SIZE);
-	#endif
-	pdx->m_pbyAudio_phys[i] = phy_addr;
-
-	pdx->m_dwAudioBuffer[i] =    pdx->m_dwVideoBuffer[i]+ pdx->m_MaxHWVideoBufferSize -MAX_AUDIO_CAP_SIZE;
-	pdx->m_dwAudioBufferHigh[i] = pdx->m_dwVideoHighBuffer[i];
-	//printk("[MV]Mem Video::m_dwVideoBuffer[%d] = %x\n", i, pdx->m_dwVideoBuffer[i]);
-	//printk("[MV]Mem Video::m_dwVideoHighBuffer[%d] = %x\n", i, pdx->m_dwVideoHighBuffer[i]);
-	//printk("[MV]Mem Audio::m_dwAudioBuffer[%d] = %x\n", i, pdx->m_dwAudioBuffer[i]);
-	//printk("[MV]Mem Audio::m_dwAudioBufferHigh[%d] = %x\n", i, pdx->m_dwAudioBufferHigh[i]);
-
+		/* the audio ring lives in the last MAX_AUDIO_CAP_SIZE bytes of each video buffer */
+		pdx->m_pbyAudioBuffer[i] = (BYTE *)(pdx->m_pbyVideoBuffer[i] + pdx->m_MaxHWVideoBufferSize -MAX_AUDIO_CAP_SIZE );
+		pdx->m_pbyAudio_phys[i] = pdx->m_pbyVideo_phys[i] + (pdx->m_MaxHWVideoBufferSize -MAX_AUDIO_CAP_SIZE);
+		pdx->m_dwAudioBuffer[i] =    pdx->m_dwVideoBuffer[i]+ pdx->m_MaxHWVideoBufferSize -MAX_AUDIO_CAP_SIZE;
+		pdx->m_dwAudioBufferHigh[i] = pdx->m_dwVideoHighBuffer[i];
 	}
 
-
-	//KdPrint(("Mem allocate::m_dwAudioBuffer[%d] = %x\n", i, pdx->m_dwAudioBuffer));
 	//-------------- video buffer
-	for(i=0; i<pdx->m_nCurreMaxVideoChl; i++)
+	for(index=0; index<pdx->m_nCurreMaxVideoChl; index++)
 	{
-		pdx->m_VideoInfo[i].m_pVideoScalerBuf = vmalloc(MAX_VIDEO_HW_W*MAX_VIDEO_HW_H*2);
-		if(pdx->m_VideoInfo[i].m_pVideoScalerBuf ==NULL)
+		pdx->m_VideoInfo[index].m_pVideoScalerBuf = vmalloc(MAX_VIDEO_HW_W*MAX_VIDEO_HW_H*2);
+		if(pdx->m_VideoInfo[index].m_pVideoScalerBuf ==NULL)
+			goto fail;
+		pdx->m_VideoInfo[index].m_pVideoYUV2Buf = vmalloc(MAX_VIDEO_HW_W*MAX_VIDEO_HW_H*2);
+		if(pdx->m_VideoInfo[index].m_pVideoYUV2Buf ==NULL)
+			goto fail;
+		pdx->m_VideoInfo[index].m_pRotateVideoBuf = vmalloc(MAX_VIDEO_HW_W*MAX_VIDEO_HW_H*2);
+		if(pdx->m_VideoInfo[index].m_pRotateVideoBuf ==NULL)
+			goto fail;
+		for(k=0; k<MAX_VIDEO_QUEUE; k++)
 		{
-			pdx->m_bBufferAllocate = TRUE;
-			DmaMemFreePool(pdx);
-			pdx->m_bBufferAllocate = FALSE;
-			status = -1;
-			return status;
-		}
-
-		pdx->m_VideoInfo[i].m_pVideoYUV2Buf = vmalloc(MAX_VIDEO_HW_W*MAX_VIDEO_HW_H*2);
-		if(pdx->m_VideoInfo[i].m_pVideoYUV2Buf ==NULL)
-		{
-			pdx->m_bBufferAllocate = TRUE;
-			DmaMemFreePool(pdx);
-			pdx->m_bBufferAllocate = FALSE;
-			status = -1;
-			return status;
-		}
-
-		pdx->m_VideoInfo[i].m_pRotateVideoBuf = vmalloc(MAX_VIDEO_HW_W*MAX_VIDEO_HW_H*2);
-		if(pdx->m_VideoInfo[i].m_pRotateVideoBuf ==NULL)
-		{
-			pdx->m_bBufferAllocate = TRUE;
-			DmaMemFreePool(pdx);
-			pdx->m_bBufferAllocate = FALSE;
-			status = -1;
-			return status;
-		}
-
-		for( k=0; k<MAX_VIDEO_QUEUE;k++)
-		{
-
-
-			pdx->m_VideoInfo[i].m_pVideoBufData[k] = kmalloc((pdx->m_MaxHWVideoBufferSize), GFP_KERNEL);
-			if(!pdx->m_VideoInfo[i].m_pVideoBufData[k])
-			{
-
-				pdx->m_bBufferAllocate = TRUE;
-				DmaMemFreePool(pdx);
-				pdx->m_bBufferAllocate = FALSE;
-				status = -1;
-				return status;
-
-			}
-			else
-			{
-
-				pdx->m_VideoInfo[i].m_pVideoData_area[k] = (char *)(((unsigned long)pdx->m_VideoInfo[i].m_pVideoBufData[k]+ PAGE_SIZE -1) & PAGE_MASK);
-				for (phyvirt_addr=(unsigned long)pdx->m_VideoInfo[i].m_pVideoData_area[k]; phyvirt_addr < ((unsigned long)pdx->m_VideoInfo[i].m_pVideoData_area[k] + (pdx->m_MaxHWVideoBufferSize));
-					 phyvirt_addr+=PAGE_SIZE)
-					 {
-						 // reserve all pages to make them remapable
-						 SetPageReserved(virt_to_page(phyvirt_addr));
-					 }
-					 memset(pdx->m_VideoInfo[i].m_pVideoBufData[k],0x0,pdx->m_MaxHWVideoBufferSize );
-			}
+			pdx->m_VideoInfo[index].m_pVideoBufData[k] = kvzalloc(pdx->m_MaxHWVideoBufferSize, GFP_KERNEL);
+			if(!pdx->m_VideoInfo[index].m_pVideoBufData[k])
+				goto fail;
 		}
 	}
 
 	//----------audio alloc
-	#if 1
 	for(i=0; i<pdx->m_nCurreMaxVideoChl; i++)
 	{
 		for( k=0; k<MAX_AUDIO_QUEUE;k++)
 		{
-			pdx->m_AudioInfo[i].m_pAudioBufData[k] =kmalloc(pdx->m_dwAudioPTKSize, GFP_KERNEL);
+			pdx->m_AudioInfo[i].m_pAudioBufData[k] = kzalloc(pdx->m_dwAudioPTKSize, GFP_KERNEL);
 			if(!pdx->m_AudioInfo[i].m_pAudioBufData[k])
-			{
-				pdx->m_bBufferAllocate = TRUE;
-				DmaMemFreePool(pdx);
-				pdx->m_bBufferAllocate = FALSE;
-				status = -1;
-				return status;
-			}
-			else
-			{
-				pdx->m_AudioInfo[i].pStatusInfo[k].byLock = MEM_UNLOCK;
-				pdx->m_AudioInfo[i].m_pAudioData_area[k] = (char *)(((unsigned long)pdx->m_AudioInfo[i].m_pAudioBufData[k] + PAGE_SIZE -1) & PAGE_MASK);
-				for (phyvirt_addr=(unsigned long)pdx->m_AudioInfo[i].m_pAudioData_area[k]; phyvirt_addr < ((unsigned long)pdx->m_AudioInfo[i].m_pAudioData_area[k]  + pdx->m_dwAudioPTKSize);
-					 phyvirt_addr+=PAGE_SIZE)
-					 {
-						 // reserve all pages to make them remapable
-						 SetPageReserved(virt_to_page(phyvirt_addr));
-					 }
-			}
+				goto fail;
+			pdx->m_AudioInfo[i].pStatusInfo[k].byLock = MEM_UNLOCK;
 		}
 	}
-	#endif
-	//------------------------------------------------------------
-	//KdPrint(("Mem allocate::m_pAudioData = %x\n",  pdx->m_pAudioData));
-	pdx->m_bBufferAllocate = TRUE;
-	//KdPrint(("DmaMemAllocPool  ed\n"));
 	return 0;
+
+fail:
+	DmaMemFreePool(pdx);
+	return -1;
 }
 
 static void StopDevice(struct hws_pcie_dev *pdx)
