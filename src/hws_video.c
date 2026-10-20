@@ -3530,7 +3530,8 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 	if (w <= 0 || h <= 0 || w > MAX_VIDEO_HW_W || h > MAX_VIDEO_HW_H || !vi->dwisRuning ||
 	    len / pitch < 3 || hf + down > MAX_VIDEO_HW_W * MAX_VIDEO_HW_H * 2)
 		return;
-	dma_sync_single_for_cpu(&pdx->pdev->dev, pdx->m_pbyVideo_phys[ch], pdx->m_MaxHWVideoBufferSize, DMA_FROM_DEVICE);
+	/* the half is coherent memory: no sync call, but order the reads after the interrupt */
+	dma_rmb();
 	mark = hws_half_mark(src, len, pitch);
 	if (*mark == HWS_HALF_MARK) {
 		/* stale: the card did not write this half */
@@ -4717,8 +4718,7 @@ int MemCopyAudioToSteam( struct hws_pcie_dev  *pdx,int dwAudioCh)
 		if((nIndex!= -1)&& bBuf)
 		{
 
-			//pci_dma_sync_single_for_cpu(pdx->pdev,pdx->m_pbyAudio_phys[dwAudioCh],MAX_AUDIO_CAP_SIZE,2);
-			dma_sync_single_for_cpu(&pdx->pdev->dev,pdx->m_pbyAudio_phys[dwAudioCh],MAX_AUDIO_CAP_SIZE,2);
+			dma_rmb();	/* the ring is coherent memory: order the reads, no sync call */
 			memcpy(bBuf, pSrcBuf, pdx->m_dwAudioPTKSize);
 
 			pdx->m_AudioInfo[dwAudioCh].m_nAudioIndex = nIndex+1;
