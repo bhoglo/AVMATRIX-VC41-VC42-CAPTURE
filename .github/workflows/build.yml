@@ -48,12 +48,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y shellcheck clang
-      # scripts/ holds the legacy installers, and play/ the vendor's demo
-      # scripts; neither passes shellcheck yet
+      # play/ holds the vendor's demo scripts, which don't pass shellcheck yet
       - name: shellcheck
         run: |
           git ls-files '*.sh' \
-            | grep -vE '^(scripts|play)/' \
+            | grep -vE '^play/' \
             | xargs shellcheck
       - name: Python checks that need no card
         run: |
