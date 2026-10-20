@@ -3500,6 +3500,16 @@ static int hws_render_frame(struct hws_pcie_dev *pdx, int nDecoder, BYTE *bBuf, 
 }
 
 /*
+ * A half copied from the DMA buffer is safe only until the card starts the
+ * next frame's run into that half, about one half-frame interval after the
+ * half-done interrupt at @ts. A copy that ends later may be torn.
+ */
+static bool hws_copy_late(struct hws_video *v, u64 ts)
+{
+	return v->half_gap && ktime_get_ns() - ts > v->half_gap;
+}
+
+/*
  * One half of a frame has landed on channel @ch (@half as in struct
  * hws_half_event). The first half takes a buffer from each consumer and
  * fills its first part; the second half fills the rest and completes the
@@ -3525,11 +3535,15 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 	enum vb2_buffer_state state = VB2_BUF_STATE_DONE;
 	struct hwsvideo_buffer *buf;
 	BYTE *first = NULL;
+	bool late = false;
 	u32 *mark;
 
 	if (w <= 0 || h <= 0 || w > MAX_VIDEO_HW_W || h > MAX_VIDEO_HW_H || !vi->dwisRuning ||
 	    len / pitch < 3 || hf + down > MAX_VIDEO_HW_W * MAX_VIDEO_HW_H * 2)
 		return;
+	/* the interval between halves bounds how long a copy may take (hws_copy_late) */
+	v->half_gap = v->last_half_ts && ts > v->last_half_ts ? ts - v->last_half_ts : 0;
+	v->last_half_ts = ts;
 	/* the half is coherent memory: no sync call, but order the reads after the interrupt */
 	dma_rmb();
 	mark = hws_half_mark(src, len, pitch);
@@ -3568,6 +3582,7 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 			memcpy(vi->m_pVideoStaging, src, hf);
 		}
 		v->top_done = true;
+		v->frame_late = hws_copy_late(v, ts);
 		goto out;
 	}
 
@@ -3592,8 +3607,10 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 	} else if (direct) {
 		list_for_each_entry(buf, &v->frame_bufs, queue)
 			memcpy((BYTE *)buf->mem + hf, src, down);
+		late = hws_copy_late(v, ts);
 	} else if (!list_empty(&v->frame_bufs)) {
 		memcpy(vi->m_pVideoStaging + hf, src, down);
+		late = hws_copy_late(v, ts);	/* the conversion below reads only the staging copy */
 		list_for_each_entry(buf, &v->frame_bufs, queue) {
 			if (first) {
 				memcpy(buf->mem, first, out_size);
@@ -3605,6 +3622,10 @@ static void hws_video_half(struct hws_pcie_dev *pdx, int ch, int half, u64 ts)
 				first = buf->mem;
 			}
 		}
+	}
+	if (state == VB2_BUF_STATE_DONE && (v->frame_late || late)) {
+		state = VB2_BUF_STATE_ERROR;	/* the card may have overwritten a half mid-copy */
+		v->late_copies++;
 	}
 	hws_finish_frame(v, state, ts, pdx->m_FrameSeq[ch]++, out_size);
 out:
@@ -5874,8 +5895,9 @@ static int hws_dbg_status_show(struct seq_file *m, void *unused)
 			   hws_hdcp_active(pdx, ch) ? "active" : "not active");
 		seq_printf(m, "  capture: %s, output %dx%d\n", pdx->m_bVCapStarted[ch] ? "running" : "stopped",
 			   v->current_out_width, v->curren_out_height);
-		seq_printf(m, "  frames: %u, lost: %u\n", READ_ONCE(pdx->m_FrameSeq[ch]),
-			   READ_ONCE(pdx->m_FramesDropped[ch]));
+		seq_printf(m, "  frames: %u, lost: %u, failed because a copy ended late: %u\n",
+			   READ_ONCE(pdx->m_FrameSeq[ch]), READ_ONCE(pdx->m_FramesDropped[ch]),
+			   READ_ONCE(v->late_copies));
 		seq_printf(m, "  audio: gaps filled with silence: %u, silence packets: %u%s\n",
 			   READ_ONCE(pdx->audio[ch].silence_gaps), READ_ONCE(pdx->audio[ch].silence_pkts),
 			   READ_ONCE(pdx->audio[ch].in_gap) ? ", in a gap now" : "");

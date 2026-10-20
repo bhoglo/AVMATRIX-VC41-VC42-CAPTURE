@@ -377,6 +377,10 @@ struct hws_video{
 	int						frame_len[2];	/* bytes in each half (HLAF_SIZE, DWON_SIZE) */
 	bool					frame_hdcp;	/* HDCP was active at this frame's first half */
 	bool					hdcp_active;	/* last HDCP state the status thread logged */
+	u64						last_half_ts;	/* interrupt time of the previous half */
+	u64						half_gap;	/* time between the last two halves: about half a frame */
+	bool					frame_late;	/* the first half's copy ended late (hws_copy_late) */
+	u32						late_copies;	/* frames failed for a late copy (debugfs) */
 	int						Interlaced;
 	//------------------------
 	struct v4l2_ctrl_handler ctrl_hdl;
