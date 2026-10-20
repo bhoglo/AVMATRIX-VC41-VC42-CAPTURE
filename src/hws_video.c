@@ -485,7 +485,7 @@ static int hws_open(struct file *file)
     v4l2_fh_init(&ctx->fh, &videodev->vdev);
     file->private_data = &ctx->fh;
 
-	#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0))
+	#ifndef HWS_FH_TAKES_FILE	/* see src/Makefile */
 	v4l2_fh_add(&ctx->fh);
 	#else
 	v4l2_fh_add(&ctx->fh, file);
@@ -504,16 +504,16 @@ static int hws_open(struct file *file)
     q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC | V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
     /*
      * Per-open lock for this queue only. vb2 releases it while a blocking
-     * DQBUF waits (via wait_prepare/wait_finish before 7.0, by itself since),
-     * which the pre-7.0 ops also need: they unlock q->lock and must not see
-     * NULL.
+     * DQBUF waits: through wait_prepare/wait_finish where vb2_ops still has
+     * them, which unlock q->lock and so must not see NULL, and by itself
+     * otherwise.
      */
     q->lock = &ctx->qmutex;
     q->dev = &pdx->pdev->dev;
 
     ret = vb2_queue_init(q);
     if (ret) {
-		#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0))
+		#ifndef HWS_FH_TAKES_FILE	/* see src/Makefile */
 		v4l2_fh_del(&ctx->fh);
 		#else
 		v4l2_fh_del(&ctx->fh, file);
@@ -582,7 +582,7 @@ static int hws_release(struct file *file)
     spin_unlock_irqrestore(&pdx->videoslock[videodev->index], flags);
 
     /* v4l2 fh cleanup */
-	#if (LINUX_VERSION_CODE < KERNEL_VERSION(6,18,0))
+	#ifndef HWS_FH_TAKES_FILE	/* see src/Makefile */
 	v4l2_fh_del(&ctx->fh);
 	#else
 	v4l2_fh_del(&ctx->fh, file);
@@ -1290,7 +1290,7 @@ static const struct vb2_ops hwspcie_video_multi_qops = {
     .queue_setup    = hws_queue_setup_multi,
     .buf_prepare    = hws_buffer_prepare_multi,
     .buf_queue      = hws_buffer_queue_multi,
-    #if (LINUX_VERSION_CODE < KERNEL_VERSION(7,0,0))
+    #ifndef HWS_VB2_NO_WAIT_PREPARE	/* see src/Makefile */
     .wait_prepare   = vb2_ops_wait_prepare,
     .wait_finish    = vb2_ops_wait_finish,
     #endif
@@ -3643,11 +3643,11 @@ int hws_audio_register(struct hws_pcie_dev *dev)
 		snd_pcm_lib_preallocate_pages_for_all(
 			pcm,
 			SNDRV_DMA_TYPE_CONTINUOUS,
-			#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6,1,0))
-			card->dev,
-			#else
+			#ifdef snd_dma_continuous_data	/* a macro until 5.19; RHEL 9.10 drops it too */
 			snd_dma_continuous_data(GFP_KERNEL),
-											  #endif
+			#else
+			card->dev,
+			#endif
 											  audio_pcm_hardware.buffer_bytes_max,
 										audio_pcm_hardware.buffer_bytes_max
 		);
