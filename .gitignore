@@ -13,3 +13,6 @@ hws_install.log
 
 # Python
 __pycache__/
+
+# unit-test binaries
+tests/unit/test_calc
