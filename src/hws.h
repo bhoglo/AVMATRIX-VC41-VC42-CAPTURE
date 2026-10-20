@@ -381,6 +381,7 @@ struct hws_video{
 	u64						half_gap;	/* time between the last two halves: about half a frame */
 	bool					frame_late;	/* the first half's copy ended late (hws_copy_late) */
 	u32						late_copies;	/* frames failed for a late copy (debugfs) */
+	u32						size_restarts;	/* engine restarts for an input-size change (debugfs) */
 	int						Interlaced;
 	//------------------------
 	struct v4l2_ctrl_handler ctrl_hdl;

@@ -5265,11 +5265,26 @@ static void SetDMAAddress(struct hws_pcie_dev *pdx)
 //-----------------------------------
 static int ChangeVideoSize(struct hws_pcie_dev *pdx,int ch,int w,int h,int interlace)
 {
+	struct hws_video *v = &pdx->video[ch];
+	bool restart = false;
 	int j;
 	int halfframeLength;
 	unsigned long flags;
+	/*
+	 * The card may apply new lengths to a run already in progress (seen on
+	 * the VC12-4K, where the rest of an old-size run landed past the new
+	 * length). Stop the channel's engine first; the frame in flight is lost
+	 * either way.
+	 */
+	if (pdx->m_bVCapStarted[ch]) {
+		hws_video_quiesce(pdx, ch);
+		restart = true;
+		v->size_restarts++;
+	}
 	if(SetVideoFormteSize(pdx,ch,w,h) != 1)
 	{
+		if (restart)
+			StartVideoCapture(pdx, ch);
 		return -1;
 	}
 	spin_lock_irqsave(&pdx->videoslock[ch], flags);
@@ -5283,6 +5298,8 @@ static int ChangeVideoSize(struct hws_pcie_dev *pdx,int ch,int w,int h,int inter
 	spin_unlock_irqrestore(&pdx->videoslock[ch], flags);
 	halfframeLength = pdx->m_format[ch].HLAF_SIZE/16;
 	WRITE_REGISTER_ULONG(pdx,(DWORD)(CBVS_IN_BUF_BASE2 + (ch*PCIE_BARADDROFSIZE)), halfframeLength); //Buffer 1 address
+	if (restart)
+		StartVideoCapture(pdx, ch);	/* the frame in flight is lost */
 	return 0;
 }
 
@@ -5925,6 +5942,7 @@ static int hws_dbg_status_show(struct seq_file *m, void *unused)
 			   hws_hdcp_active(pdx, ch) ? "active" : "not active");
 		seq_printf(m, "  capture: %s, output %dx%d\n", pdx->m_bVCapStarted[ch] ? "running" : "stopped",
 			   v->current_out_width, v->curren_out_height);
+		seq_printf(m, "  engine restarts for a size change: %u\n", READ_ONCE(v->size_restarts));
 		seq_printf(m, "  frames: %u, lost: %u, failed because a copy ended late: %u\n",
 			   READ_ONCE(pdx->m_FrameSeq[ch]), READ_ONCE(pdx->m_FramesDropped[ch]),
 			   READ_ONCE(v->late_copies));
