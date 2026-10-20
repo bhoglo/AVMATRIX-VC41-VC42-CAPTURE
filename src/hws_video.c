@@ -24,6 +24,7 @@ static int StartVideoCapture(struct hws_pcie_dev *pdx,int index);
 static int StartAudioCapture(struct hws_pcie_dev *pdx,int index);
 static void StopAudioCapture(struct hws_pcie_dev *pdx,int index);
 static void StopVideoCapture(struct hws_pcie_dev *pdx,int index);
+static void hws_video_quiesce(struct hws_pcie_dev *pdx, int index);
 static void InitVideoSys(struct hws_pcie_dev *pdx,int set);
 static bool hws_input_timeperframe(struct hws_pcie_dev *pdx, int ch, struct v4l2_fract *tpf);
 struct hwsvideo_buffer;
@@ -4493,6 +4494,8 @@ static void hws_remove(struct pci_dev *pdev)
 	debugfs_remove_recursive(dev->dbg);
 	/* then everything that touches the card or its buffers */
 	StopKSThread(dev);
+	for (i = 0; i < dev->m_nCurreMaxVideoChl; i++)
+		hws_video_quiesce(dev, i);	/* before the DMA buffers are freed */
 	StopDevice(dev);
 	irq_teardown(dev);
 	for (i = 0; i < MAX_VID_CHANNELS; i++)
@@ -4658,6 +4661,20 @@ static int StartVideoCapture(struct hws_pcie_dev *pdx,int index)
 	pdx->video_toggle[index] = 0;	/* the first event is then a first half */
 	EnableVideoCapture(pdx,index,1);
 	return 0;
+}
+
+/*
+ * Stop video DMA before a buffer the card may be writing is returned or
+ * freed. On the VC12-4K, a probe found that once the cleared enable bit has
+ * been read back (EnableVideoCapture() reads register 2 after writing it),
+ * the card writes nothing more: it finishes the 2 KiB burst in progress
+ * before that. Register 0 bit 3 doesn't show DMA in progress, so there is
+ * nothing to poll; the pause is margin, not a measured need. Sleeps.
+ */
+static void hws_video_quiesce(struct hws_pcie_dev *pdx, int index)
+{
+	StopVideoCapture(pdx, index);
+	usleep_range(100, 200);
 }
 
 static void StopVideoCapture(struct hws_pcie_dev *pdx,int index)
@@ -6176,7 +6193,7 @@ static int hws_suspend(struct device *d)
 	for (i = 0; i < pdx->m_nCurreMaxVideoChl; i++) {
 		pdx->m_ResumeVideo[i] = pdx->m_bVCapStarted[i];
 		if (pdx->m_bVCapStarted[i])
-			EnableVideoCapture(pdx, i, 0);
+			hws_video_quiesce(pdx, i);
 		if (pdx->m_bACapStarted[i])
 			EnableAudioCapture(pdx, i, 0);
 	}
